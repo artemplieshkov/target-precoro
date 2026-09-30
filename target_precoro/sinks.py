@@ -2,6 +2,8 @@
 
 import math
 
+from hotglue_singer_sdk.exceptions import FatalAPIError
+
 from target_precoro.client import PrecoroSink
 
 
@@ -32,8 +34,17 @@ class ItemCustomFieldsSink(PrecoroSink):
             else:
                 return {"error": f"Parent {parentExternalId} not found"}
         return record
-        
-    
+
+    @staticmethod
+    def _is_deleted_option_error(error: Exception) -> bool:
+        """PUT on an option id that was deleted in Precoro returns 404 with this message."""
+        response = getattr(error, "response", None)
+        return (
+            response is not None
+            and response.status_code == 404
+            and "Unable to find Option Item Custom Field entity" in (response.text or "")
+        )
+
     def upsert_record(self, record: dict, context: dict):
         state_updates = dict()
         method = "POST"
@@ -86,7 +97,29 @@ class ItemCustomFieldsSink(PrecoroSink):
                 # enable=false) — default it only when the source didn't send one, so
                 # integrations that explicitly toggle enable aren't forced back to enabled.
                 record["enable"] = True
-            response = self.request_api(method, endpoint=endpoint, request_data=record)
+            try:
+                response = self.request_api(method, endpoint=endpoint, request_data=record)
+            except FatalAPIError as e:
+                if method != "PUT" or not self._is_deleted_option_error(e):
+                    raise
+                # The option id we have (snapshot / AccountSetup) points to an option that was
+                # deleted in Precoro - recreate it instead of failing the record.
+                if self.is_only_update_existing_records(
+                    is_icf=True, is_dcf=False, custom_field_id=custom_field_id
+                ):
+                    self.logger.warning(
+                        f"Option {id} no longer exists in Precoro and only_update_existing_records "
+                        f"is set for custom field {custom_field_id} - skipping instead of recreating"
+                    )
+                    state_updates["skipped"] = True
+                    return None, True, state_updates
+                self.logger.warning(
+                    f"Option {id} no longer exists in Precoro (custom field {custom_field_id}) - "
+                    f"recreating it via POST"
+                )
+                method = "POST"
+                endpoint = base_endpoint
+                response = self.request_api(method, endpoint=endpoint, request_data=record)
             id = response.json()["id"]
 
             if method == "POST":

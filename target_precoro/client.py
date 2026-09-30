@@ -779,7 +779,9 @@ class PrecoroSink(HotglueSink):
                 msg = response.text
             except:
                 msg = self.response_error_message(response)
-            raise FatalAPIError(msg)
+            error = FatalAPIError(msg)
+            error.response = response
+            raise error
 
     def get_default_values(self):
         res = {}
