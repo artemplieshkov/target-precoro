@@ -366,16 +366,29 @@ class PrecoroSink(HotglueSink):
             return [int(legal_entity_id)]
         return []
 
-    def _get_existing_supplier_currencies(self, supplier_id) -> list:
+    def merge_supplier_existing_lists(self, record: dict, supplier_id) -> None:
+        """Fetch the existing supplier once and merge both its currencies and legal entities
+        into the update payload, instead of one GET per merged list."""
+        if record.get("currencies[]") is None and record.get("supplierLegalEntityIds[]") is None:
+            return
+
+        existing = self._get_existing_supplier(supplier_id)
+        self.merge_supplier_currencies(record, existing)
+        self.merge_supplier_legal_entities(record, existing)
+
+    def _get_existing_supplier(self, supplier_id) -> dict:
         try:
             response = self.request_api("GET", endpoint=f"/suppliers/{supplier_id}")
             data = response.json()
         except Exception as exc:
-            self.logger.warning(f"Failed to fetch existing supplier {supplier_id} for currency merge: {exc}")
-            return []
-        return data.get("currencies") or [] if isinstance(data, dict) else []
+            self.logger.warning(f"Failed to fetch existing supplier {supplier_id} for currency/legal entity merge: {exc}")
+            return {}
+        return data if isinstance(data, dict) else {}
 
-    def merge_supplier_currencies(self, record: dict, supplier_id) -> None:
+    def _get_existing_supplier_currencies(self, existing: dict) -> list:
+        return existing.get("currencies") or []
+
+    def merge_supplier_currencies(self, record: dict, existing: dict) -> None:
         """Merge the incoming currency into the supplier's existing currency list instead of replacing it.
 
         Some source systems (e.g. Dynamics BC) only carry a single default currency per vendor,
@@ -388,22 +401,14 @@ class PrecoroSink(HotglueSink):
             return
 
         incoming_list = incoming if isinstance(incoming, list) else [incoming]
-        merged = list(self._get_existing_supplier_currencies(supplier_id))
+        merged = list(self._get_existing_supplier_currencies(existing))
         for currency in incoming_list:
             if currency and currency not in merged:
                 merged.append(currency)
         record["currencies[]"] = merged
 
-    def _get_existing_supplier_legal_entity_ids(self, supplier_id) -> list[str]:
-        try:
-            response = self.request_api("GET", endpoint=f"/suppliers/{supplier_id}")
-            data = response.json()
-        except Exception as exc:
-            self.logger.warning(f"Failed to fetch existing supplier {supplier_id} for legal entity merge: {exc}")
-            return []
-        if not isinstance(data, dict):
-            return []
-        entities = (data.get("supplierLegalEntities") or {}).get("data", [])
+    def _get_existing_supplier_legal_entity_ids(self, existing: dict) -> list[str]:
+        entities = (existing.get("supplierLegalEntities") or {}).get("data", [])
         if not isinstance(entities, list):
             return []
         legal_entity_ids = []
@@ -414,7 +419,7 @@ class PrecoroSink(HotglueSink):
                 legal_entity_ids.append(str(legal_entity_id))
         return legal_entity_ids
 
-    def merge_supplier_legal_entities(self, record: dict, supplier_id) -> None:
+    def merge_supplier_legal_entities(self, record: dict, existing: dict) -> None:
         """Merge AccountSetup's legal entities into the existing list instead of replacing it --
         a legal entity added directly in Precoro is invisible to AccountSetup and would get
         silently dropped on overwrite."""
@@ -423,7 +428,7 @@ class PrecoroSink(HotglueSink):
             return
 
         incoming_list = incoming if isinstance(incoming, list) else [incoming]
-        merged = list(self._get_existing_supplier_legal_entity_ids(supplier_id))
+        merged = list(self._get_existing_supplier_legal_entity_ids(existing))
         for legal_entity_id in incoming_list:
             if legal_entity_id and legal_entity_id not in merged:
                 merged.append(legal_entity_id)
