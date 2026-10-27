@@ -44,6 +44,7 @@ class ItemCustomFieldsSink(PrecoroSink):
         if record:
             account_setup_context = self.prepare_account_setup_context(record)
             externalId = account_setup_context.get("external_id")
+            legal_entity_ids = self.pop_option_legal_entity_ids(record)
 
             custom_field_id = record.pop("custom_field_id", None)
             if custom_field_id:
@@ -88,6 +89,7 @@ class ItemCustomFieldsSink(PrecoroSink):
                 record["enable"] = True
             response = self.request_api(method, endpoint=endpoint, request_data=record)
             id = response.json()["id"]
+            self.sync_option_legal_entities(id, response.json(), legal_entity_ids, account_setup_context)
 
             if method == "POST":
                 self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
@@ -175,7 +177,9 @@ class FallbackSink(PrecoroSink):
             account_setup_context = self.prepare_account_setup_context(record)
             externalId = account_setup_context.get("external_id")
             custom_field_id = None
+            legal_entity_ids = None
             if self.name == "documentcustomfields":
+                legal_entity_ids = self.pop_option_legal_entity_ids(record)
                 custom_field_id = record.pop("custom_field_id", None)
                 if custom_field_id:
                     custom_field_id = str(int(custom_field_id)) if isinstance(custom_field_id, float) else str(custom_field_id)
@@ -236,8 +240,10 @@ class FallbackSink(PrecoroSink):
                 idn = response.json().get("idn")
             pk = idn if self.name in ["invoices", "purchaseorders", "payments"] else id
 
-            if self.name == "documentcustomfields" and method == "POST":
-                self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
+            if self.name == "documentcustomfields":
+                self.sync_option_legal_entities(id, response.json(), legal_entity_ids, account_setup_context)
+                if method == "POST":
+                    self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
 
             try:
                 self.finalize_account_setup(account_setup_context, pk, record)

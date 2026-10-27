@@ -212,11 +212,11 @@ class PrecoroSink(HotglueSink):
     def _is_custom_field_option_stream(self) -> bool:
         return self.name in {"itemcustomfields", "documentcustomfields"}
 
-    def _get_depend_add_endpoint(self) -> str | None:
+    def _get_depend_endpoint(self, action: str = "depend_add") -> str | None:
         if self.name == "itemcustomfields":
-            return "/itemcustomfields/options/depend_add"
+            return f"/itemcustomfields/options/{action}"
         if self.name == "documentcustomfields":
-            return "/documentcustomfields/options/depend_add"
+            return f"/documentcustomfields/options/{action}"
         return None
 
     def _get_depend_add_option_id_param(self) -> str | None:
@@ -227,7 +227,13 @@ class PrecoroSink(HotglueSink):
         return None
 
     def hit_custom_field_option_depend_add(self, option_id, legal_entity_ids: list[int]) -> dict:
-        endpoint = self._get_depend_add_endpoint()
+        return self.hit_custom_field_option_depend(option_id, legal_entity_ids, "depend_add")
+
+    def hit_custom_field_option_depend_remove(self, option_id, legal_entity_ids: list[int]) -> dict:
+        return self.hit_custom_field_option_depend(option_id, legal_entity_ids, "depend_remove")
+
+    def hit_custom_field_option_depend(self, option_id, legal_entity_ids: list[int], action: str) -> dict:
+        endpoint = self._get_depend_endpoint(action)
         option_id_param = self._get_depend_add_option_id_param()
         if not endpoint or not option_id_param:
             return None
@@ -586,6 +592,55 @@ class PrecoroSink(HotglueSink):
         )
         depend_resp = self.hit_custom_field_option_depend_add(precoro_id, legal_entity_ids)
         self.logger.info(f"depend_add Response: {depend_resp}")
+
+    def pop_option_legal_entity_ids(self, record: dict) -> list[int] | None:
+        """Legal entities an option must depend on, sent by an ETL that doesn't use AccountSetup
+        (e.g. Sage Intacct, where an ERP id is the same in every entity): "legalEntityIds" is the
+        full set, comma separated. "" = no links (available to every legal entity), missing/null =
+        leave the option's links as they are. Popped so it isn't sent as an option field."""
+        if "legalEntityIds" not in record:
+            return None
+        value = record.pop("legalEntityIds")
+        if value is None or (isinstance(value, float) and value != value):
+            return None
+        items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+        return sorted({int(float(str(item).strip())) for item in items if str(item).strip()})
+
+    def _get_option_legal_entity_ids(self, option: dict) -> set[int] | None:
+        """Legal entities the option depends on, from its POST/PUT response (None if not included)."""
+        key = (
+            "itemCustomFieldOptionDependOnLegalEntities"
+            if self.name == "itemcustomfields"
+            else "documentCustomFieldOptionDependOnLegalEntities"
+        )
+        depends = option.get(key)
+        if not isinstance(depends, dict):
+            return None
+        return {
+            int(depend["legalEntityId"])
+            for depend in depends.get("data") or []
+            if depend.get("legalEntityId") is not None
+        }
+
+    def sync_option_legal_entities(self, option_id, option: dict, legal_entity_ids: list[int] | None, context: dict) -> None:
+        """Make the option depend on exactly legal_entity_ids - adds the missing links and removes
+        the ones the source no longer has. AccountSetup flows keep their own depend_add logic."""
+        if legal_entity_ids is None or context.get("account_setup_enabled"):
+            return
+
+        current = self._get_option_legal_entity_ids(option)
+        if current is None:
+            self.logger.warning(f"{self.name} option {option_id}: legal entity links not in the response, only adding {legal_entity_ids}")
+            current = set()
+
+        to_add = [legal_entity_id for legal_entity_id in legal_entity_ids if legal_entity_id not in current]
+        to_remove = sorted(current - set(legal_entity_ids))
+        if to_add:
+            self.logger.info(f"Linking {self.name} option {option_id} to legal entities {to_add}")
+            self.hit_custom_field_option_depend_add(option_id, to_add)
+        if to_remove:
+            self.logger.info(f"Unlinking {self.name} option {option_id} from legal entities {to_remove}")
+            self.hit_custom_field_option_depend_remove(option_id, to_remove)
 
     def finalize_account_setup(self, context: dict, precoro_id, record: dict) -> None:
         """Patch AccountSetup record after Precoro entity has been created or updated."""
