@@ -594,10 +594,8 @@ class PrecoroSink(HotglueSink):
         self.logger.info(f"depend_add Response: {depend_resp}")
 
     def pop_option_legal_entity_ids(self, record: dict) -> list[int] | None:
-        """Legal entities an option must depend on, sent by an ETL that doesn't use AccountSetup
-        (e.g. Sage Intacct, where an ERP id is the same in every entity): "legalEntityIds" is the
-        full set, comma separated. "" = no links (available to every legal entity), missing/null =
-        leave the option's links as they are. Popped so it isn't sent as an option field."""
+        """Full set of legal entities for an option, without AccountSetup (comma separated).
+        "" = every legal entity, missing/null = leave the links as they are."""
         if "legalEntityIds" not in record:
             return None
         value = record.pop("legalEntityIds")
@@ -607,7 +605,7 @@ class PrecoroSink(HotglueSink):
         return sorted({int(float(str(item).strip())) for item in items if str(item).strip()})
 
     def _get_option_legal_entity_ids(self, option: dict) -> set[int] | None:
-        """Legal entities the option depends on, from its POST/PUT response (None if not included)."""
+        """From the option's POST/PUT response, None if not included."""
         key = (
             "itemCustomFieldOptionDependOnLegalEntities"
             if self.name == "itemcustomfields"
@@ -623,8 +621,7 @@ class PrecoroSink(HotglueSink):
         }
 
     def sync_option_legal_entities(self, option_id, option: dict, legal_entity_ids: list[int] | None, context: dict) -> None:
-        """Make the option depend on exactly legal_entity_ids - adds the missing links and removes
-        the ones the source no longer has. AccountSetup flows keep their own depend_add logic."""
+        """Adds the missing links and removes the extra ones. AccountSetup has its own depend_add."""
         if legal_entity_ids is None or context.get("account_setup_enabled"):
             return
 
