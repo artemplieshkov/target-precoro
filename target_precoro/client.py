@@ -372,15 +372,18 @@ class PrecoroSink(HotglueSink):
             return [int(legal_entity_id)]
         return []
 
-    def merge_supplier_existing_lists(self, record: dict, supplier_id) -> None:
+    def merge_supplier_existing_lists(self, record: dict, supplier_id, replace_legal_entities: bool = False) -> None:
         """Fetch the existing supplier once and merge both its currencies and legal entities
-        into the update payload, instead of one GET per merged list."""
-        if record.get("currencies[]") is None and record.get("supplierLegalEntityIds[]") is None:
+        into the update payload, instead of one GET per merged list. replace_legal_entities:
+        the source's list is complete, so Precoro's PUT replaces the current one."""
+        merge_legal_entities = record.get("supplierLegalEntityIds[]") is not None and not replace_legal_entities
+        if record.get("currencies[]") is None and not merge_legal_entities:
             return
 
         existing = self._get_existing_supplier(supplier_id)
         self.merge_supplier_currencies(record, existing)
-        self.merge_supplier_legal_entities(record, existing)
+        if merge_legal_entities:
+            self.merge_supplier_legal_entities(record, existing)
 
     def _get_existing_supplier(self, supplier_id) -> dict:
         try:

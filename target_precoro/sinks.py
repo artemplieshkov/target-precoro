@@ -195,6 +195,8 @@ class FallbackSink(PrecoroSink):
                     custom_field_id,
                 )
 
+            replace_legal_entities = record.pop("replaceSupplierLegalEntities", None) is True
+
             # Skip new records when only_update_existing_records applies
             id = record.pop("id", None)
             if not id and self.is_only_update_existing_records(
@@ -222,7 +224,7 @@ class FallbackSink(PrecoroSink):
                 method = "PUT"
                 endpoint = f"{base_endpoint}/{id}"
                 if self.name == "suppliers":
-                    self.merge_supplier_existing_lists(record, id)
+                    self.merge_supplier_existing_lists(record, id, replace_legal_entities)
             if self.name == "documentcustomfields" and "enable" not in record:
                 # Precoro's option PUT treats a missing "enable" as "disable" rather
                 # than "leave unchanged" (confirmed: PUT without it flips an active
