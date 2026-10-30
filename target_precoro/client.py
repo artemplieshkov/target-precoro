@@ -20,6 +20,15 @@ class PrecoroSink(HotglueSink):
         "itemcustomfields",
     }
 
+    # Precoro's POST (and PUT, where there is one) save externalId from the body for these
+    # streams - checked in their forms/DTOs, a missing key leaves the current value
+    EXTERNAL_ID_IN_PAYLOAD_STREAMS = {
+        "legalentities",
+        "locations",
+        "items",
+        "payments",
+    }
+
     ENTITY_TYPE_MAP = {
         "purchaseorders": 0,
         "receipts": 4,
@@ -212,11 +221,11 @@ class PrecoroSink(HotglueSink):
     def _is_custom_field_option_stream(self) -> bool:
         return self.name in {"itemcustomfields", "documentcustomfields"}
 
-    def _get_depend_add_endpoint(self) -> str | None:
+    def _get_depend_endpoint(self, action: str = "depend_add") -> str | None:
         if self.name == "itemcustomfields":
-            return "/itemcustomfields/options/depend_add"
+            return f"/itemcustomfields/options/{action}"
         if self.name == "documentcustomfields":
-            return "/documentcustomfields/options/depend_add"
+            return f"/documentcustomfields/options/{action}"
         return None
 
     def _get_depend_add_option_id_param(self) -> str | None:
@@ -227,7 +236,13 @@ class PrecoroSink(HotglueSink):
         return None
 
     def hit_custom_field_option_depend_add(self, option_id, legal_entity_ids: list[int]) -> dict:
-        endpoint = self._get_depend_add_endpoint()
+        return self.hit_custom_field_option_depend(option_id, legal_entity_ids, "depend_add")
+
+    def hit_custom_field_option_depend_remove(self, option_id, legal_entity_ids: list[int]) -> dict:
+        return self.hit_custom_field_option_depend(option_id, legal_entity_ids, "depend_remove")
+
+    def hit_custom_field_option_depend(self, option_id, legal_entity_ids: list[int], action: str) -> dict:
+        endpoint = self._get_depend_endpoint(action)
         option_id_param = self._get_depend_add_option_id_param()
         if not endpoint or not option_id_param:
             return None
@@ -366,15 +381,18 @@ class PrecoroSink(HotglueSink):
             return [int(legal_entity_id)]
         return []
 
-    def merge_supplier_existing_lists(self, record: dict, supplier_id) -> None:
+    def merge_supplier_existing_lists(self, record: dict, supplier_id, replace_legal_entities: bool = False) -> None:
         """Fetch the existing supplier once and merge both its currencies and legal entities
-        into the update payload, instead of one GET per merged list."""
-        if record.get("currencies[]") is None and record.get("supplierLegalEntityIds[]") is None:
+        into the update payload, instead of one GET per merged list. replace_legal_entities:
+        the source's list is complete, so Precoro's PUT replaces the current one."""
+        merge_legal_entities = record.get("supplierLegalEntityIds[]") is not None and not replace_legal_entities
+        if record.get("currencies[]") is None and not merge_legal_entities:
             return
 
         existing = self._get_existing_supplier(supplier_id)
         self.merge_supplier_currencies(record, existing)
-        self.merge_supplier_legal_entities(record, existing)
+        if merge_legal_entities:
+            self.merge_supplier_legal_entities(record, existing)
 
     def _get_existing_supplier(self, supplier_id) -> dict:
         try:
@@ -587,6 +605,52 @@ class PrecoroSink(HotglueSink):
         depend_resp = self.hit_custom_field_option_depend_add(precoro_id, legal_entity_ids)
         self.logger.info(f"depend_add Response: {depend_resp}")
 
+    def pop_option_legal_entity_ids(self, record: dict) -> list[int] | None:
+        """Full set of legal entities for an option, without AccountSetup (comma separated).
+        "" = every legal entity, missing/null = leave the links as they are."""
+        if "legalEntityIds" not in record:
+            return None
+        value = record.pop("legalEntityIds")
+        if value is None or (isinstance(value, float) and value != value):
+            return None
+        items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+        return sorted({int(float(str(item).strip())) for item in items if str(item).strip()})
+
+    def _get_option_legal_entity_ids(self, option: dict) -> set[int] | None:
+        """From the option's POST/PUT response, None if not included."""
+        key = (
+            "itemCustomFieldOptionDependOnLegalEntities"
+            if self.name == "itemcustomfields"
+            else "documentCustomFieldOptionDependOnLegalEntities"
+        )
+        depends = option.get(key)
+        if not isinstance(depends, dict):
+            return None
+        return {
+            int(depend["legalEntityId"])
+            for depend in depends.get("data") or []
+            if depend.get("legalEntityId") is not None
+        }
+
+    def sync_option_legal_entities(self, option_id, option: dict, legal_entity_ids: list[int] | None, context: dict) -> None:
+        """Adds the missing links and removes the extra ones. AccountSetup has its own depend_add."""
+        if legal_entity_ids is None or context.get("account_setup_enabled"):
+            return
+
+        current = self._get_option_legal_entity_ids(option)
+        if current is None:
+            self.logger.warning(f"{self.name} option {option_id}: legal entity links not in the response, only adding {legal_entity_ids}")
+            current = set()
+
+        to_add = [legal_entity_id for legal_entity_id in legal_entity_ids if legal_entity_id not in current]
+        to_remove = sorted(current - set(legal_entity_ids))
+        if to_add:
+            self.logger.info(f"Linking {self.name} option {option_id} to legal entities {to_add}")
+            self.hit_custom_field_option_depend_add(option_id, to_add)
+        if to_remove:
+            self.logger.info(f"Unlinking {self.name} option {option_id} from legal entities {to_remove}")
+            self.hit_custom_field_option_depend_remove(option_id, to_remove)
+
     def finalize_account_setup(self, context: dict, precoro_id, record: dict) -> None:
         """Patch AccountSetup record after Precoro entity has been created or updated."""
         if not context.get("account_setup_enabled"):
@@ -604,8 +668,18 @@ class PrecoroSink(HotglueSink):
         patch_resp = self.hit_account_setup_patch(account_setup_ref_id, precoro_id, record)
         self.logger.info(f"AccountSetup Patch Response: {patch_resp}")
 
+    def should_send_external_id_in_payload(self, context: dict) -> bool:
+        """external_id_in_payload: send externalId in the upsert body, saving the PATCH after it."""
+        return (
+            str(self.config.get("external_id_in_payload", "")).lower() == "true"
+            and self.name in self.EXTERNAL_ID_IN_PAYLOAD_STREAMS
+            and not context.get("account_setup_enabled")
+        )
+
     def should_patch_external_id(self, context: dict) -> bool:
         """Whether externalId should be patched after upsert instead of sent in the upsert payload."""
+        if self.should_send_external_id_in_payload(context):
+            return False
         return not (context.get("account_setup_enabled") and self._is_custom_field_option_stream())
 
     @property

@@ -44,6 +44,7 @@ class ItemCustomFieldsSink(PrecoroSink):
         if record:
             account_setup_context = self.prepare_account_setup_context(record)
             externalId = account_setup_context.get("external_id")
+            legal_entity_ids = self.pop_option_legal_entity_ids(record)
 
             custom_field_id = record.pop("custom_field_id", None)
             if custom_field_id:
@@ -88,6 +89,7 @@ class ItemCustomFieldsSink(PrecoroSink):
                 record["enable"] = True
             response = self.request_api(method, endpoint=endpoint, request_data=record)
             id = response.json()["id"]
+            self.sync_option_legal_entities(id, response.json(), legal_entity_ids, account_setup_context)
 
             if method == "POST":
                 self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
@@ -175,7 +177,9 @@ class FallbackSink(PrecoroSink):
             account_setup_context = self.prepare_account_setup_context(record)
             externalId = account_setup_context.get("external_id")
             custom_field_id = None
+            legal_entity_ids = None
             if self.name == "documentcustomfields":
+                legal_entity_ids = self.pop_option_legal_entity_ids(record)
                 custom_field_id = record.pop("custom_field_id", None)
                 if custom_field_id:
                     custom_field_id = str(int(custom_field_id)) if isinstance(custom_field_id, float) else str(custom_field_id)
@@ -190,6 +194,8 @@ class FallbackSink(PrecoroSink):
                     base_endpoint,
                     custom_field_id,
                 )
+
+            replace_legal_entities = record.pop("replaceSupplierLegalEntities", None) is True
 
             # Skip new records when only_update_existing_records applies
             id = record.pop("id", None)
@@ -218,7 +224,7 @@ class FallbackSink(PrecoroSink):
                 method = "PUT"
                 endpoint = f"{base_endpoint}/{id}"
                 if self.name == "suppliers":
-                    self.merge_supplier_existing_lists(record, id)
+                    self.merge_supplier_existing_lists(record, id, replace_legal_entities)
             if self.name == "documentcustomfields" and "enable" not in record:
                 # Precoro's option PUT treats a missing "enable" as "disable" rather
                 # than "leave unchanged" (confirmed: PUT without it flips an active
@@ -226,6 +232,9 @@ class FallbackSink(PrecoroSink):
                 # send one, so integrations that explicitly toggle enable
                 # aren't forced back to enabled.
                 record["enable"] = True
+            # only a non-empty one, so an update never wipes the current externalId
+            if externalId and self.should_send_external_id_in_payload(account_setup_context):
+                record["externalId"] = externalId
             response = self.request_api(method, endpoint=endpoint, request_data=record)
             # if invoice is fully paid return a dummy id so the job doesn't fail
             if self.is_invoice_paid:
@@ -236,8 +245,10 @@ class FallbackSink(PrecoroSink):
                 idn = response.json().get("idn")
             pk = idn if self.name in ["invoices", "purchaseorders", "payments"] else id
 
-            if self.name == "documentcustomfields" and method == "POST":
-                self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
+            if self.name == "documentcustomfields":
+                self.sync_option_legal_entities(id, response.json(), legal_entity_ids, account_setup_context)
+                if method == "POST":
+                    self.remember_created_option(base_endpoint, record.get("code"), record.get("name"), id)
 
             try:
                 self.finalize_account_setup(account_setup_context, pk, record)
