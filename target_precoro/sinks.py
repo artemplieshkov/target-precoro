@@ -232,6 +232,9 @@ class FallbackSink(PrecoroSink):
                 # send one, so integrations that explicitly toggle enable
                 # aren't forced back to enabled.
                 record["enable"] = True
+            # only a non-empty one, so an update never wipes the current externalId
+            if externalId and self.should_send_external_id_in_payload(account_setup_context):
+                record["externalId"] = externalId
             response = self.request_api(method, endpoint=endpoint, request_data=record)
             # if invoice is fully paid return a dummy id so the job doesn't fail
             if self.is_invoice_paid:

@@ -20,6 +20,15 @@ class PrecoroSink(HotglueSink):
         "itemcustomfields",
     }
 
+    # Precoro's POST (and PUT, where there is one) save externalId from the body for these
+    # streams - checked in their forms/DTOs, a missing key leaves the current value
+    EXTERNAL_ID_IN_PAYLOAD_STREAMS = {
+        "legalentities",
+        "locations",
+        "items",
+        "payments",
+    }
+
     ENTITY_TYPE_MAP = {
         "purchaseorders": 0,
         "receipts": 4,
@@ -659,8 +668,18 @@ class PrecoroSink(HotglueSink):
         patch_resp = self.hit_account_setup_patch(account_setup_ref_id, precoro_id, record)
         self.logger.info(f"AccountSetup Patch Response: {patch_resp}")
 
+    def should_send_external_id_in_payload(self, context: dict) -> bool:
+        """external_id_in_payload: send externalId in the upsert body, saving the PATCH after it."""
+        return (
+            str(self.config.get("external_id_in_payload", "")).lower() == "true"
+            and self.name in self.EXTERNAL_ID_IN_PAYLOAD_STREAMS
+            and not context.get("account_setup_enabled")
+        )
+
     def should_patch_external_id(self, context: dict) -> bool:
         """Whether externalId should be patched after upsert instead of sent in the upsert payload."""
+        if self.should_send_external_id_in_payload(context):
+            return False
         return not (context.get("account_setup_enabled") and self._is_custom_field_option_stream())
 
     @property
